@@ -15,16 +15,55 @@ import (
 	yaml "github.com/goccy/go-yaml"
 )
 
+type DNSFallbackFilter struct {
+	GeoIP  bool     `yaml:"geoip"`
+	IPCIDR []string `yaml:"ipcidr"`
+}
+
+type DNSConfig struct {
+	Enabled        bool              `yaml:"enabled"`
+	Nameserver     []string          `yaml:"nameserver"`
+	Fallback       []string          `yaml:"fallback"`
+	FallbackFilter DNSFallbackFilter `yaml:"fallback-filter"`
+}
+
+type Proxy struct {
+	Name   string `yaml:"name"`
+	Type   string `yaml:"type"`
+	Server string `yaml:"server"`
+	Port   int    `yaml:"port"`
+	UUID   string `yaml:"uuid"`
+
+	AlterID int    `yaml:"alterId"`
+	Cipher  string `yaml:"cipher"`
+
+	TLS            bool   `yaml:"tls,omitempty"`
+	SkipCertVerify bool   `yaml:"skip-cert-verify,omitempty"`
+	ServerName     string `yaml:"servername,omitempty"`
+
+	Network string `yaml:"network,omitempty"`
+	WSOpts  any    `yaml:"ws-opts,omitempty"`
+}
+
+type ProxyGroup struct {
+	Name      string   `yaml:"name"`
+	Type      string   `yaml:"type"`
+	URL       string   `yaml:"url"`
+	Interval  int      `yaml:"interval"`
+	Tolerance int      `yaml:"tolerance"`
+	Proxies   []string `yaml:"proxies"`
+}
+
 type ClashConfig struct {
-	MixedPort          int                      `yaml:"mixed-port"`
-	AllowLan           bool                     `yaml:"allow-lan"`
-	LogLevel           string                   `yaml:"log-level"`
-	ExternalController string                   `yaml:"external-controller"`
-	IPv6               bool                     `yaml:"ipv6"`
-	DNS                map[string]interface{}   `yaml:"dns"`
-	Proxies            []map[string]interface{} `yaml:"proxies"`
-	ProxyGroups        []map[string]interface{} `yaml:"proxy-groups"`
-	Rules              []string                 `yaml:"rules"`
+	MixedPort          int          `yaml:"mixed-port"`
+	AllowLan           bool         `yaml:"allow-lan"`
+	LogLevel           string       `yaml:"log-level"`
+	ExternalController string       `yaml:"external-controller"`
+	IPv6               bool         `yaml:"ipv6"`
+	DNS                DNSConfig    `yaml:"dns"`
+	Proxies            []Proxy      `yaml:"proxies"`
+	ProxyGroups        []ProxyGroup `yaml:"proxy-groups"`
+	Rules              []string     `yaml:"rules"`
 }
 
 var emojiRegex = regexp.MustCompile(`[\x{1F300}-\x{1FAFF}]`)
@@ -60,7 +99,7 @@ func decodeBase64(input string) (string, error) {
 	return "", fmt.Errorf("invalid base64")
 }
 
-func parseVLESS(link string) map[string]interface{} {
+func parseVLESS(link string) *Proxy {
 	u, err := url.Parse(link)
 	if err != nil {
 		return nil
@@ -74,30 +113,29 @@ func parseVLESS(link string) map[string]interface{} {
 		name = u.Hostname()
 	}
 
-	proxy := map[string]interface{}{
-		"name":    name,
-		"type":    "vless",
-		"server":  u.Hostname(),
-		"port":    port,
-		"uuid":    u.User.Username(),
-		"alterId": 0,
-		"cipher":  "auto",
+	proxy := &Proxy{
+		Name:    name,
+		Type:    "vless",
+		Server:  u.Hostname(),
+		Port:    port,
+		UUID:    u.User.Username(),
+		AlterID: 0,
+		Cipher:  "auto",
 	}
 
 	if q.Get("security") == "tls" {
-		proxy["tls"] = true
-		proxy["skip-cert-verify"] = true
-
+		proxy.TLS = true
+		proxy.SkipCertVerify = true
 		sni := q.Get("sni")
 		if sni == "" {
 			sni = u.Hostname()
 		}
-		proxy["servername"] = sni
+		proxy.ServerName = sni
 	}
 
 	if q.Get("type") == "ws" {
-		proxy["network"] = "ws"
-		proxy["ws-opts"] = map[string]interface{}{
+		proxy.Network = "ws"
+		proxy.WSOpts = map[string]any{
 			"path": q.Get("path"),
 			"headers": map[string]string{
 				"host": q.Get("host"),
@@ -108,20 +146,21 @@ func parseVLESS(link string) map[string]interface{} {
 	return proxy
 }
 
+//////////////////// BUILD CLASH CONFIG ////////////////////
+
 func buildConfig(decoded string) ([]byte, error) {
 	lines := strings.Split(decoded, "\n")
 
-	var proxies []map[string]interface{}
+	var proxies []Proxy
 	var proxyNames []string
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-
 		if strings.HasPrefix(line, "vless://") {
 			p := parseVLESS(line)
 			if p != nil {
-				proxies = append(proxies, p)
-				proxyNames = append(proxyNames, p["name"].(string))
+				proxies = append(proxies, *p)
+				proxyNames = append(proxyNames, p.Name)
 			}
 		}
 	}
@@ -132,19 +171,14 @@ func buildConfig(decoded string) ([]byte, error) {
 		LogLevel:           "info",
 		ExternalController: "127.0.0.1:9090",
 		IPv6:               false,
-		DNS: map[string]interface{}{
-			"enabled": true,
-			"nameserver": []string{
-				"1.1.1.1",
-				"8.8.8.8",
-			},
-			"fallback": []string{
-				"1.0.0.1",
-				"8.8.4.4",
-			},
-			"fallback-filter": map[string]interface{}{
-				"geoip": true,
-				"ipcidr": []string{
+
+		DNS: DNSConfig{
+			Enabled:    true,
+			Nameserver: []string{"1.1.1.1", "8.8.8.8"},
+			Fallback:   []string{"1.0.0.1", "8.8.4.4"},
+			FallbackFilter: DNSFallbackFilter{
+				GeoIP: true,
+				IPCIDR: []string{
 					"10.0.0.0/8",
 					"100.64.0.0/10",
 					"169.254.0.0/16",
@@ -158,17 +192,20 @@ func buildConfig(decoded string) ([]byte, error) {
 				},
 			},
 		},
+
 		Proxies: proxies,
-		ProxyGroups: []map[string]interface{}{
+
+		ProxyGroups: []ProxyGroup{
 			{
-				"name":      "maingroup",
-				"type":      "url-test",
-				"url":       "https://speed.cloudflare.com/__down?bytes=100",
-				"interval":  30,
-				"tolerance": 300,
-				"proxies":   proxyNames,
+				Name:      "maingroup",
+				Type:      "url-test",
+				URL:       "https://speed.cloudflare.com/__down?bytes=100",
+				Interval:  30,
+				Tolerance: 300,
+				Proxies:   proxyNames,
 			},
 		},
+
 		Rules: []string{
 			"GEOIP,private,DIRECT,no-resolve",
 			"GEOIP,IR,DIRECT",
@@ -186,9 +223,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// FULL PATH PASSTHROUGH
 	path := strings.TrimPrefix(r.URL.Path, "/")
-
 	subURL := strings.TrimRight(base, "/") + "/" + path
 
 	raw, err := fetchSubscription(subURL)
@@ -224,7 +259,6 @@ func main() {
 		}
 
 		http.HandleFunc("/", handler)
-
 		fmt.Println("Server running on", listen)
 		http.ListenAndServe(listen, nil)
 		return
