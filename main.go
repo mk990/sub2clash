@@ -128,15 +128,34 @@ func buildConfig(decoded string) ([]byte, error) {
 
 	config := ClashConfig{
 		MixedPort:          7890,
-		AllowLan:           true,
+		AllowLan:           false,
 		LogLevel:           "info",
-		ExternalController: "0.0.0.0:9090",
+		ExternalController: "127.0.0.1:9090",
 		IPv6:               false,
 		DNS: map[string]interface{}{
 			"enabled": true,
 			"nameserver": []string{
 				"1.1.1.1",
-				"4.2.2.4",
+				"8.8.8.8",
+			},
+			"fallback": []string{
+				"1.0.0.1",
+				"8.8.4.4",
+			},
+			"fallback-filter": map[string]interface{}{
+				"geoip": true,
+				"ipcidr": []string{
+					"10.0.0.0/8",
+					"100.64.0.0/10",
+					"169.254.0.0/16",
+					"172.16.0.0/12",
+					"192.0.0.0/24",
+					"198.18.0.0/15",
+					"240.0.0.0/4",
+					"64:ff9b:1::/48",
+					"fc00::/7",
+					"fe80::/64",
+				},
 			},
 		},
 		Proxies: proxies,
@@ -151,6 +170,8 @@ func buildConfig(decoded string) ([]byte, error) {
 			},
 		},
 		Rules: []string{
+			"GEOIP,private,DIRECT,no-resolve",
+			"GEOIP,IR,DIRECT",
 			"MATCH,maingroup",
 		},
 	}
