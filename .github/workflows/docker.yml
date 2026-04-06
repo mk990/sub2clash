@@ -57,7 +57,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ env.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/sub2clash:latest
+            ghcr.io/${{ github.repository_owner }}/sub2clash:${{ env.VERSION }}
             ${{ github.actor }}/sub2clash:latest
             ${{ github.actor }}/sub2clash:${{ env.VERSION }}
