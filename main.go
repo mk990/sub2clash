@@ -213,7 +213,11 @@ func buildConfig(decoded string) ([]byte, error) {
 		},
 	}
 
-	return yaml.MarshalWithOptions(config, yaml.Indent(2))
+	return yaml.MarshalWithOptions(
+		config,
+		yaml.Indent(2),
+		yaml.IndentSequence(true),
+	)
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
