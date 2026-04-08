@@ -11,9 +11,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	yaml "github.com/goccy/go-yaml"
 )
+
+//////////////////// STRUCTS ////////////////////
 
 type DNSFallbackFilter struct {
 	GeoIP  bool     `yaml:"geoip"`
@@ -66,12 +69,38 @@ type ClashConfig struct {
 	Rules              []string     `yaml:"rules"`
 }
 
+//////////////////// HELPERS ////////////////////
+
 var emojiRegex = regexp.MustCompile(`[\x{1F300}-\x{1FAFF}]`)
+var usageRegex = regexp.MustCompile(`([\d.]+)GB`)
 
 func cleanName(name string) string {
 	name = emojiRegex.ReplaceAllString(name, "")
 	return strings.TrimSpace(name)
 }
+
+func gbToBytes(gb float64) int64 {
+	return int64(gb * 1024 * 1024 * 1024)
+}
+
+func parseExpire(dateStr string) int64 {
+	t, err := time.Parse("2006/01/02", dateStr)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
+}
+
+func extractUsedGB(name string) float64 {
+	m := usageRegex.FindStringSubmatch(name)
+	if len(m) < 2 {
+		return 0
+	}
+	v, _ := strconv.ParseFloat(m[1], 64)
+	return v
+}
+
+//////////////////// NETWORK ////////////////////
 
 func fetchSubscription(subURL string) (string, error) {
 	req, _ := http.NewRequest("GET", subURL, nil)
@@ -98,6 +127,8 @@ func decodeBase64(input string) (string, error) {
 	}
 	return "", fmt.Errorf("invalid base64")
 }
+
+//////////////////// VLESS ////////////////////
 
 func parseVLESS(link string) *Proxy {
 	u, err := url.Parse(link)
@@ -146,9 +177,9 @@ func parseVLESS(link string) *Proxy {
 	return proxy
 }
 
-//////////////////// BUILD CLASH CONFIG ////////////////////
+//////////////////// BUILD CONFIG ////////////////////
 
-func buildConfig(decoded string) ([]byte, error) {
+func buildConfig(decoded string) ([]byte, []Proxy, error) {
 	lines := strings.Split(decoded, "\n")
 
 	var proxies []Proxy
@@ -171,7 +202,6 @@ func buildConfig(decoded string) ([]byte, error) {
 		LogLevel:           "info",
 		ExternalController: "127.0.0.1:9090",
 		IPv6:               false,
-
 		DNS: DNSConfig{
 			Enabled:    true,
 			Nameserver: []string{"1.1.1.1", "8.8.8.8"},
@@ -179,22 +209,13 @@ func buildConfig(decoded string) ([]byte, error) {
 			FallbackFilter: DNSFallbackFilter{
 				GeoIP: true,
 				IPCIDR: []string{
-					"10.0.0.0/8",
-					"100.64.0.0/10",
-					"169.254.0.0/16",
-					"172.16.0.0/12",
-					"192.0.0.0/24",
-					"198.18.0.0/15",
-					"240.0.0.0/4",
-					"64:ff9b:1::/48",
-					"fc00::/7",
-					"fe80::/64",
+					"10.0.0.0/8","100.64.0.0/10","169.254.0.0/16",
+					"172.16.0.0/12","192.0.0.0/24","198.18.0.0/15",
+					"240.0.0.0/4","64:ff9b:1::/48","fc00::/7","fe80::/64",
 				},
 			},
 		},
-
 		Proxies: proxies,
-
 		ProxyGroups: []ProxyGroup{
 			{
 				Name:      "maingroup",
@@ -205,7 +226,6 @@ func buildConfig(decoded string) ([]byte, error) {
 				Proxies:   proxyNames,
 			},
 		},
-
 		Rules: []string{
 			"GEOIP,private,DIRECT,no-resolve",
 			"GEOIP,IR,DIRECT",
@@ -213,44 +233,50 @@ func buildConfig(decoded string) ([]byte, error) {
 		},
 	}
 
-	return yaml.MarshalWithOptions(
-		config,
-		yaml.Indent(2),
-		yaml.IndentSequence(true),
-	)
+	out, err := yaml.MarshalWithOptions(config, yaml.Indent(2), yaml.IndentSequence(true))
+	return out, proxies, err
 }
+
+//////////////////// HANDLER ////////////////////
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	base := os.Getenv("SUB_BASE")
-	if base == "" {
-		http.Error(w, "SUB_BASE not set", 500)
-		return
-	}
-
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	subURL := strings.TrimRight(base, "/") + "/" + path
 
-	raw, err := fetchSubscription(subURL)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
+	raw, _ := fetchSubscription(subURL)
+	decoded, _ := decodeBase64(raw)
+
+	out, proxies, _ := buildConfig(decoded)
+
+	// ---- read query ----
+	q := r.URL.Query()
+	totalGB, _ := strconv.ParseFloat(q.Get("total"), 64)
+	expireUnix := parseExpire(q.Get("expire"))
+
+	totalTraffic := gbToBytes(totalGB)
+
+	// ⭐ ONLY FIRST PROXY
+	var usedDownload int64
+	if len(proxies) > 0 {
+		usedGB := extractUsedGB(proxies[0].Name)
+		usedDownload = gbToBytes(usedGB)
 	}
 
-	decoded, err := decodeBase64(raw)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-
-	out, err := buildConfig(decoded)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
+	userinfo := fmt.Sprintf(
+		"upload=%d; download=%d; total=%d; expire=%d",
+		0, usedDownload, totalTraffic, expireUnix,
+	)
 
 	w.Header().Set("Content-Type", "text/yaml")
+	w.Header().Set("Subscription-Userinfo", userinfo)
+	w.Header().Set("Profile-Update-Interval", "24")
+	w.Header().Set("Content-Disposition", "attachment; filename=clash.yaml")
+
 	w.Write(out)
 }
+
+//////////////////// MAIN ////////////////////
 
 func main() {
 	servMode := flag.Bool("serv", false, "run as server")
@@ -261,7 +287,6 @@ func main() {
 		if listen == "" {
 			listen = ":8080"
 		}
-
 		http.HandleFunc("/", handler)
 		fmt.Println("Server running on", listen)
 		http.ListenAndServe(listen, nil)
